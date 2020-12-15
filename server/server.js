@@ -1,0 +1,963 @@
+// start express
+const express = require("express");
+const expressApp = express();
+const http = require("http").Server(expressApp); // http is part of node but we require it for socket.io
+// init socket.io
+// const io = require("socket.io")(http) does not work anymore, you need to handle CORS (if you want a seperated back & front-end);
+const io = require("socket.io")(http, {
+  cors: {
+    origin: ["http://localhost:8080", process.env.ORIGIN], // or * for allowing all sites
+    methods: ["GET", "POST"],
+  },
+});
+const port = process.env.PORT || 3000;
+
+// load other scripts
+const Validate = require("./s_scripts/validate.js");
+const GetRandom = require("./s_scripts/getRandom.js");
+const Game = require("./s_scripts/game.js");
+
+http.listen(port, () => {
+  console.log(`Listening at port ${port}...`);
+});
+
+//init connected clients
+const clients = {};
+
+//init rooms
+const rooms = {};
+
+const createRoom = room => {};
+
+/*--- Functions ---*/
+// calculate all current connected clients
+const calcConnectedClients = () => {
+  let nameSummary = [];
+  Object.values(clients).forEach(client => {
+    client.username ? nameSummary.push(client.username) : "";
+  });
+  console.log(`Connected users: ${nameSummary}`);
+  io.emit("connectedClients", nameSummary);
+};
+
+// get all rooms the user is in
+const getUserRooms = socket => {
+  // convert rooms object to an array with Object.entries
+  // get all roomNames, name: key, room:value
+  return Object.entries(rooms).reduce((roomNames, [roomName, room]) => {
+    if (room.users[socket.id]) {
+      //if the room contains the user, push it to the roomNames array
+      roomNames.push(roomName);
+    }
+    return roomNames;
+  }, []);
+};
+
+/*--- Game Functions ---*/
+const nextTurn = (room, socket) => {
+  /* roomObj: {
+  name: 'George-Bush-Senior-CQTQP',
+  users: {
+    qv0450HiS1GwD2wFAAAF: 'Aaron',
+    wT3B21u2AF77WBshAAAJ: 'Jef',
+    'kpM85q-Uskq6Zy1YAAAL': 'Dirk'
+  } } */
+
+  console.log("LOGS FROM NEXTTURN ___socket.username____");
+  console.log(socket.username + " " + room.playerTurn);
+
+  // check if there is a currentTurn property & requested by the previous player
+  if (
+    (room.currentTurn || room.currentTurn === 0) &&
+    room.users.hasOwnProperty(socket.id)
+  ) {
+    let usersArr = Object.keys(room.users);
+    console.log(`room.currentTurn: ${room.currentTurn}`);
+    // trace the turn to a player (e.g. turn 5 with 4 players => playerTurn will be 0 again)
+    let newTurnUserArrPos = room.currentTurn++ % usersArr.length;
+    console.log(`room.currentTurn++: ${room.currentTurn}`);
+    // set the playerTurn to the next player
+    room.playerTurn = usersArr[newTurnUserArrPos];
+    console.log("-----");
+    console.log(room.playerTurn);
+    console.log(`${room.currentTurn} is the turn, ${room.playerTurn} can play`);
+
+    // check if the player already finished (pass turn if true)
+    console.log("clients[room.playerTurn].placement");
+    console.log(clients[room.playerTurn].placement);
+
+    /* TEMPORARILY DISABLE AUTO SKIP TURNS */
+    /*
+    // check if the player already finished
+    if (clients[room.playerTurn].placement) {
+      //if player already had a placement, go to the next player who has no placement
+      const findNextUnplacedPlayer = (iteration = 0) => {
+        if (iteration <= usersArr.length) {
+          //base case
+          newTurnUserArrPos = room.currentTurn++ % usersArr.length;
+          room.playerTurn = usersArr[newTurnUserArrPos];
+          // if no placement on playerTurn: return
+          if (!clients[room.playerTurn].placement) {
+            console.log(
+              `in if pt.placement: room.playerTurn (an id) returned that has no placement: ${room.playerTurn}`
+            );
+            return room.playerTurn;
+          } else {
+            //recursive call to itself
+            console.log(
+              `${
+                clients[room.playerTurn]
+              } has been passed automatically, placement: ${
+                clients[room.playerTurn].placement
+              } iteration: ${iteration}`
+            );
+            iteration++;
+            findNextUnplacedPlayer(iteration);
+          }
+        } else {
+          return false;
+        }
+      };
+      return findNextUnplacedPlayer();
+    } else {
+      // currentPlayer is valid, send return
+      return room.playerTurn;
+    }
+    */
+
+    return room.playerTurn;
+  } else if (room && room.users.hasOwnProperty(socket.id)) {
+    // start turns
+    room.currentTurn = 0;
+    console.log(room.users);
+    console.log(room.currentTurn);
+    let usersArr = Object.keys(room.users);
+    let newTurnUserArrPos = room.currentTurn++ % usersArr.length;
+    room.playerTurn = usersArr[newTurnUserArrPos];
+    //room.playerTurn = Object.keys(room.users)[room.currentTurn];
+    console.log(
+      `${room.currentTurn} is the turn, ${room.playerTurn} can start`
+    );
+    return room.playerTurn;
+  }
+  console.log("can't trigger nextTurn: Room or user not found");
+};
+
+const checkForNewRound = (room, socket) => {
+  // check how many consecutive passed turns there are
+  if (!room.consecutivePassedTurns) {
+    // if there is no consecutivePassedTurn property, create one
+    room.consecutivePassedTurns = 1;
+  } else {
+    //if there is a consecutivePassedTurns property, increment by 1
+    room.consecutivePassedTurns++;
+  }
+
+  // get finishedUsers, because we want subtract them from our total room users
+  let finishedUsersLength = 0;
+
+  /* TEMPORARILY DISABLE AUTO SKIP TURNS */
+  /*
+  if (room.finishedUsers) {
+    finishedUsersLength = room.finishedUsers.length;
+  }
+  */
+
+  // if every user passed, create a new round
+  if (
+    Object.keys(room.users).length - finishedUsersLength ===
+    room.consecutivePassedTurns
+  ) {
+    // if there is no lastUserWhoPlayed because nobody played a card & everyone passed, set it to the first user
+    if (!room.lastUserWhoPlayed) {
+      let returnedValueNextTurn = nextTurn(room, socket);
+      room.lastUserWhoPlayed = returnedValueNextTurn;
+
+      console.log("room.lastUserWhoPlayed:");
+      console.log(room.lastUserWhoPlayed);
+      /* before: set hardcoded to first user
+      room.lastUserWhoPlayed = Object.keys(room.users)[0];
+      console.log("Object.keys(room.users)[0]:");
+      console.log(Object.keys(room.users)[0]);
+      console.log("lastUserWhoPlayed did not exist, lastUserWhoPlayed:");
+      let returnedVal = nextTurn(room, socket);
+      console.log("/_/_/_/_/_/_/_/_/_");
+      console.log(`returnedVal: ${returnedVal}`);
+      console.log(Object.keys(room.users[returnedVal]));
+      console.log("room.users:");
+      console.log(room.users);
+      */
+    }
+    console.log(`New round required, ${room.lastUserWhoPlayed} can start!`);
+    // reset consectuivePassedRounds, currentTurn & playerTurn
+    room.consecutivePassedTurns = 0;
+    console.log("index lastUserWhoPlayed:");
+    console.log(Object.keys(room.users).indexOf(room.lastUserWhoPlayed.id));
+    room.playerTurn = room.lastUserWhoPlayed.id;
+    console.log("room.lastUserWhoPlayed:");
+    console.log(room.lastUserWhoPlayed.username);
+    // add +1 on currentTurn, because we won't use nextTurn() function to create our first new turn
+    room.currentTurn =
+      Object.keys(room.users).indexOf(room.lastUserWhoPlayed.id) + 1;
+    console.log("room.playerTurn: " + room.playerTurn);
+    console.log("room.currentTurn: " + room.currentTurn);
+
+    // return a value to let the code know a newRound was created and it should give the turn to the lastUserWhoPlayed
+    return room.lastUserWhoPlayed.id;
+  }
+};
+
+const checkForNewGame = (roomName, socket, playedCards) => {
+  // check if roomName was passed & finishedUsers is equal to total users
+  if (
+    !rooms[roomName] ||
+    rooms[roomName].finishedUsers.length !==
+      Object.keys(rooms[roomName].users).length
+  ) {
+    console.log(
+      "check for newGame failed if check (not valid room or finishedUsers length is different from users length"
+    );
+    return false;
+  }
+
+  // check if a new game is needed by comparing the finished users amount and total users
+  if (
+    rooms[roomName].finishedUsersAmount ===
+    Object.keys(rooms[roomName].users).length
+  ) {
+    console.log("New game required");
+    // create a new game
+
+    // CARDS
+    // get a random deck of cards
+    let shuffledGameDeck = Game.getShuffledDeck();
+
+    // split the deck evenly between players
+    let splitUpDeck = Game.splitUp(
+      shuffledGameDeck,
+      Object.keys(rooms[roomName].users).length
+    );
+
+    // distribute it fairly (for now)
+    //give each player cards from the deck (deal cards to president first, because president starts)
+    rooms[roomName].finishedUsers.forEach(finishedUserId => {
+      clients[finishedUserId].cards = splitUpDeck.shift();
+    });
+
+    // get roles (president, vice-president, vice-scum, scum)
+    let president = rooms[roomName].finishedUsers[0];
+    let vicePresident = rooms[roomName].finishedUsers[1];
+    let viceScum =
+      rooms[roomName].finishedUsers[rooms[roomName].finishedUsers.length - 2];
+    let scum =
+      rooms[roomName].finishedUsers[rooms[roomName].finishedUsers.length - 1];
+    console.log(`president: ${president}`);
+    console.log(`vicePresident: ${vicePresident}`);
+    console.log(`viceScum: ${viceScum} `);
+    console.log(`scum: ${scum}`);
+
+    // distribute cards according to placements
+    // last place (scum) must give their two best cards to the president
+    giveBestCards(scum, president, 2);
+    // second to last place (vice-scum) must give their best card to the vice-president
+    giveBestCards(viceScum, vicePresident, 1);
+    // second place (vice-president) gives their worst card to the vice-scum
+    giveWorstCards(vicePresident, viceScum, 1);
+    // first place (president) gives their 2 worst cards to the scum
+    giveWorstCards(president, scum, 2);
+
+    // reset stuff from previous round(s) placements, cards, finishedUsersAmount, finishedUsers,...
+    rooms[roomName].consecutivePassedTurns = 0;
+    delete rooms[roomName].finishedUsers;
+    delete rooms[roomName].finishedUsersAmount;
+    delete rooms[roomName].lastUserWhoPlayed;
+    delete rooms[roomName].lastPlayedCards;
+
+    // start round with president
+    rooms[roomName].playerTurn = president;
+    // add +1 on currentTurn, because we won't use nextTurn() function to create our first new turn
+    rooms[roomName].currentTurn =
+      Object.keys(rooms[roomName].users).indexOf(president) + 1;
+
+    // send emit that a new game has started (send cards, turn events...)
+    console.log(rooms[roomName]);
+    console.log("a new game has started!");
+    return true;
+  } else {
+    // Game is not finished
+    console.log("game was not finished");
+  }
+};
+
+// losers will have to give up their best cards
+const giveBestCards = (from, to, amount) => {
+  // loop over cards and remove the best one(s) 2>A>K>Q>J>10..
+
+  // sort cards from highest to lowest
+  clients[from].cards.sort((cardA, cardB) => {
+    if (Game.CARD_VALUE_MAP[cardA.value] === 2) return -1;
+    if (Game.CARD_VALUE_MAP[cardB.value] === 2) return 1;
+    if (Game.CARD_VALUE_MAP[cardA.value] < Game.CARD_VALUE_MAP[cardB.value])
+      return 1;
+    if (Game.CARD_VALUE_MAP[cardA.value] > Game.CARD_VALUE_MAP[cardB.value])
+      return -1;
+    return 0;
+  });
+
+  // remove custom amount of cards and push to other user (start from index 0)
+  console.log(`giveBestCards: from: ${from}  to:${to}`);
+  console.log("clients[to].cards before splice");
+  console.log(clients[to].cards);
+  console.log(clients[to].cards.push(...clients[from].cards.splice(0, amount)));
+  console.log("clients[to].cards after splice");
+  console.log(clients[to].cards);
+  console.log("-----");
+  //clients[to].cards.push(...(clients[from].cards.splice(0, amount)));
+
+  /*
+  // loop over the cards and sort them from high to low
+    cards.sort((cardA,cardB) => {
+    if(CARD_VALUE_MAP[cardA.value] === 2) return -1;
+    if(CARD_VALUE_MAP[cardB.value] === 2) return 1;
+    if(CARD_VALUE_MAP[cardA.value] < CARD_VALUE_MAP[cardB.value]) return 1;
+    if(CARD_VALUE_MAP[cardA.value] > CARD_VALUE_MAP[cardB.value]) return -1;
+    return 0;
+});
+
+  // remove custom amount of cards and push to other user (start from index 0)
+  cards.splice(0, amount); 
+
+  */
+
+  clients[from].cards.forEach(card => {
+    console.log(`${card.value} becomes ${Game.CARD_VALUE_MAP[card.value]}`);
+  });
+};
+
+// winners can give their worst cards to the losers
+const giveWorstCards = (from, to, amount) => {
+  // loop over cards and remove the worst one(s) 2>A>K>Q>J>10..
+
+  // sort cards from lowest to highest
+  clients[from].cards.sort((cardA, cardB) => {
+    if (Game.CARD_VALUE_MAP[cardA.value] === 2) return 1;
+    if (Game.CARD_VALUE_MAP[cardB.value] === 2) return -1;
+    if (Game.CARD_VALUE_MAP[cardA.value] > Game.CARD_VALUE_MAP[cardB.value])
+      return 1;
+    if (Game.CARD_VALUE_MAP[cardA.value] < Game.CARD_VALUE_MAP[cardB.value])
+      return -1;
+    return 0;
+  });
+
+  // remove custom amount of cards and push to other user (start from index 0)
+  console.log(`giveWorstCards: from: ${from}  to:${to}`);
+  console.log("clients[to].cards before splice");
+  console.log(clients[to].cards);
+  console.log(clients[to].cards.push(...clients[from].cards.splice(0, amount)));
+  console.log("clients[to].cards after splice");
+  console.log(clients[to].cards);
+  console.log("------");
+};
+
+// show card amount of each user
+const getUsersCardsAmounts = roomName => {
+  if (rooms[roomName] && rooms[roomName].users) {
+    let getUsers = Object.keys(rooms[roomName].users);
+
+    let usersWithCardAmounts = getUsers.map(userFromObj => ({
+      username: clients[userFromObj].username,
+      amount: clients[userFromObj].cards.length,
+    }));
+
+    // let usersWithCardAmounts = getUsers.map(userFromObj => ({
+    //   [clients[userFromObj].username]: clients[userFromObj].cards.length,
+    // }));
+
+    io.in(rooms[roomName].name).emit(
+      "getUsersWithCardsAmounts",
+      usersWithCardAmounts
+    );
+    /*
+    let usersWithCardAmounts = getUsers.map(userFromObj => ({
+      [clients[userFromObj].username]: clients[userFromObj].username,
+      cardsAmount: clients[userFromObj].cards.length,
+    }));
+    */
+  }
+};
+
+/*--- SOCKET.IO ---*/
+io.on("connection", socket => {
+  //log if a user connected
+  console.log(`a user connected: ${socket.id}`);
+
+  //generate userNumber (unique for this connection)
+  const randomNum = Math.floor(Math.random() * 10);
+
+  // use [] to use variable name as the property name
+  clients[socket.id] = {
+    id: socket.id,
+  };
+
+  /*-- Rooms --*/
+  //create a room
+  socket.on("createRoom", () => {
+    //stop creation of extra rooms when user is already in one, or if user is not logged in
+    if (socket.connectedRoom || !socket.username) {
+      console.log(`already linked to a room or user is not logged in`);
+      return socket.emit("receiveFromServer", "error creating rooms");
+    }
+    //get a randomRoomName
+    let roomName = GetRandom.randomRoomName(rooms);
+    console.log(`Current room count: ${Object.keys(rooms).length}`);
+
+    //check if the room does not already exist (this normally can't happen because randomRoomName should give a unique name)
+    if (rooms[roomName]) {
+      console.log("failed to create new room, it already exists");
+      // emit an error
+      return;
+    }
+    //if the roomName does not exist, socket.join will create a new room
+    socket.join(roomName);
+
+    //socket.rooms will contain multiple rooms because each socket automatically joins a room identified by its id as a default room
+    console.log(socket.rooms);
+
+    //add it to our own room object and pass an empty default users object
+    rooms[roomName] = { name: roomName, users: {} };
+
+    //add creator of the room to the room by default
+    rooms[roomName].users[socket.id] = socket.username;
+
+    //create a rooms property to keep track of user rooms
+    socket.connectedRoom = rooms[roomName].name;
+    clients[socket.id].connectedRoom = rooms[roomName];
+
+    //emit an event that we created a room to the creator
+    //this should redirect the user to the created room in front-end
+    socket.emit("createdRoom", roomName);
+
+    //because a new room was created, send an event with updated rooms
+    io.emit("allRooms", rooms);
+  });
+
+  //join a room
+  socket.on("joinRoom", roomName => {
+    //check if room already exsists and if user is logged in
+    if (roomName in rooms && socket.username) {
+      //check if user is already connected to another room
+      if (socket.connectedRoom && socket.connectedRoom !== roomName) {
+        console.log(
+          `already connected to another room: ${
+            Object.values(socket.connectedRoom)[0]
+          }`
+        );
+
+        //leave previous connected room with socket.io
+        socket.leave(socket.connectedRoom.name);
+
+        //delete from our own rooms object
+        if (rooms[socket.connectedRoom] && rooms[socket.connectedRoom].users) {
+          delete rooms[socket.connectedRoom].users[socket.id];
+        }
+
+        //if the previous connected room is empty, delete the room
+        if (Object.keys(rooms[socket.connectedRoom].users).length === 0) {
+          delete rooms[socket.connectedRoom];
+          //because a room was deleted, send an updated rooms event
+          io.emit("allRooms", rooms);
+        }
+
+        //delete our connectedRoom attribute
+        delete socket.connectedRoom;
+
+        //delete from our clients object
+        delete clients[socket.id].connectedRoom;
+        io.emit("allRooms", rooms);
+      }
+
+      //join a new room
+      socket.join(roomName);
+      console.log(`${socket.username} joined ${roomName}`);
+
+      //add joined user to our rooms object
+      console.log(rooms);
+      console.log("roomName");
+      console.log(roomName);
+      console.log("rooms[roomName]");
+      console.log(rooms[roomName]);
+      rooms[roomName].users[socket.id] = socket.username;
+      io.to(roomName).emit(
+        "roomEntered",
+        `${socket.username} has joined ${roomName}`
+      );
+
+      //set our connectedRoom to the room we just joined
+      socket.connectedRoom = rooms[roomName].name;
+      clients[socket.id].connectedRoom = rooms[roomName].name;
+
+      socket.emit("joinedRoom", roomName);
+    } else {
+      return socket.emit("err", `Can't find room ${roomName}`);
+    }
+    io.emit("allRooms", rooms);
+  });
+
+  //communicate with the room only (send message with name that comes from socket.id)
+  socket.on("sendToRoom", (roomName, message) => {
+    io.in(roomName).emit("toRoom", {
+      message: message,
+      name: rooms[roomName].users[socket.id],
+    });
+  });
+
+  // When a Vue client mounts get a message with the client id from the client.
+  socket.on("establishedConnection", message => {
+    console.log(message + ` id: ${socket.id}`);
+  });
+  // send msg to client who has connected
+  socket.emit(
+    "receiveFromServer",
+    "this msg is from the server, you are connected"
+  );
+
+  // When the button is pressed send a msg to the client who pressed, and a message to all connected clients
+  socket.on("msg", message => {
+    console.log(message);
+    socket.emit("receiveFromServer", message);
+    io.emit("receiveFromServer", message + " to all clients");
+  });
+
+  //link name
+  socket.on("name", name => {
+    //validate the name
+    if (name) {
+      // trim unwanted characters
+      name = name.match(/[A-Z-a-z-0-9]/g);
+      // join the array of remaining letters
+      name = name.join("");
+      console.log(`Sanitized name: ${name}`);
+    }
+    if (name.length === 0) {
+      socket.emit("name-error", "please enter a valid name");
+      return;
+    } else if (name.length > 20) {
+      socket.emit(
+        "name-error",
+        "Please enter a shorter name (max 20 characters)"
+      );
+      return;
+    }
+
+    // check if name is not already in use
+    let nameInUse = false;
+    for (const socketId in clients) {
+      if (clients.hasOwnProperty(socketId)) {
+        const otherClient = clients[socketId];
+        if (otherClient.username === name) {
+          nameInUse = true;
+        }
+      }
+    }
+    if (nameInUse) {
+      socket.emit("name-error", "Name is already in use");
+      return;
+    }
+
+    //Pass name to clients and show users
+    clients[socket.id].username = name;
+    console.log(clients[socket.id]);
+    // You can also add an username attribute to the socket connection instance
+    socket.username = name;
+    console.log(
+      `Socket.username: ${socket.username} ${(clients[
+        socket.id
+      ].username = name)}`
+    );
+    socket.emit("name", clients[socket.id]);
+
+    // Get all rooms
+    console.log(rooms);
+    socket.emit("allRooms", rooms);
+
+    // Get all names from clients
+    calcConnectedClients();
+  });
+
+  // // Add reconnect, if socket.username already exists, log user in
+  // if (socket.username) {
+  //   socket.emit("name", clients[socket.id]);
+  // }
+
+  /*-- Game --*/
+  //get all users
+  socket.on("getRoomUsers", roomName => {
+    if (rooms[roomName] && rooms[roomName].users) {
+      io.in(roomName).emit("getRoomUsers", rooms[roomName].users);
+    }
+  });
+
+  // player clicked "start game" in a room
+  socket.on("startGame", roomName => {
+    console.log(`player wants ${roomName} to start!`);
+
+    if (roomName && rooms[roomName] && socket.username) {
+      console.log(`player started ${roomName}`);
+      if (
+        Object.keys(rooms[roomName].users).length > 8 ||
+        Object.keys(rooms[roomName].users).length < 4
+      ) {
+        console.log("Inavlid user amount to start the room!");
+        return;
+      }
+      io.in(roomName).emit("startGame", roomName);
+
+      try {
+        // start the game
+        setTimeout(() => {
+          /* handle the game logic */
+          // emit an event that starts the game
+          io.in(roomName).emit("gameReady", rooms[roomName].users);
+          let users = Object.keys(rooms[roomName].users);
+          console.log(rooms[roomName].users);
+          console.log(users);
+
+          // get a random deck of cards
+          let shuffledGameDeck = Game.getShuffledDeck();
+          // split the deck evenly between players
+          let splitUpDeck = Game.splitUp(shuffledGameDeck, users.length);
+          //give each player cards from the deck
+          users.forEach(userId => {
+            clients[userId].cards = splitUpDeck.shift();
+            //send specific cards to a specific player
+            io.in(clients[userId].id).emit("cards", clients[userId].cards);
+          });
+
+          // show card amount of each user
+          getUsersCardsAmounts(roomName);
+
+          // initiate first turn
+          io.in(nextTurn(rooms[roomName], socket)).emit("turn", "your turn");
+          console.log(
+            "firstTurn: clients[rooms[roomName].playerTurn].username"
+          );
+          console.log(clients[rooms[roomName].playerTurn].username);
+          io.in(rooms[roomName].name).emit(
+            "turn",
+            clients[rooms[roomName].playerTurn].username
+          );
+        }, 4000);
+        console.log("this should come after the cards, but doesn't");
+      } catch {
+        console.log(
+          "something went wrong in start game timeOut: user probably disconnected during timeout"
+        );
+      }
+    }
+  });
+
+  socket.on("confirmTurn", (roomName, playedCards) => {
+    // start by verifying incoming event (correct room, player turn)
+    if (
+      roomName &&
+      rooms[roomName] &&
+      rooms[roomName].playerTurn &&
+      rooms[roomName].playerTurn === socket.id
+    ) {
+      console.log("played cards: " + playedCards);
+      console.log(playedCards);
+
+      // check if player did not play any cards
+      if (playedCards.length === 0) {
+        console.log(`${socket.username} Did not play any card, passed a turn`);
+        socket.passedLastRound = true;
+        console.log(`socket.passedLastRound: ${socket.passedLastRound}`);
+
+        // check if there should be a new round
+        if (checkForNewRound(rooms[roomName], socket)) {
+          // reset currentTurn & playerTurn & stop code execution
+
+          /* TEMPORARILY DISABLE AUTO SKIP TURNS */
+
+          /*
+          // check if user is not already finished yet
+          if (clients[rooms[roomName][lastUserWhoPlayed.id]].placement) {
+            // check if game is not totally finished
+            if (rooms[roomName].finishedUsersAmount < rooms[roomName.users]) {
+              // change lastUserWhoPlayed to an unfinished user (pref the next one)
+
+              delete rooms[roomName].lastUserWhoPlayed;
+
+              console.log("lastUserWhoPlayed deleted");
+
+              console.log("****");
+              console.log("USER PLACEMENT EXISTS IN CHECKFORNEWROUND");
+              console.log("****");
+            }
+          }
+          */
+
+          io.in(rooms[roomName].lastUserWhoPlayed.id).emit("turn", "your turn");
+          io.in(rooms[roomName].name).emit(
+            "turn",
+            clients[rooms[roomName].lastUserWhoPlayed.id].username
+          );
+
+          delete rooms[roomName].lastPlayedCards;
+          io.in(rooms[roomName].name).emit(
+            "lastPlayedCards",
+            rooms[roomName].lastPlayedCards,
+            socket.username
+          );
+
+          return console.log("start new round");
+        }
+      } else {
+        // there are playedCards: check if they are valid
+        // check if they are in user deck, and remove them after
+        let removedElements = 0;
+        let clientCardsCopy = [...clients[socket.id].cards]; // work on a copy, because we want to validate first
+        // remove them from user deck (copy)
+        playedCards.forEach(cardPlayed => {
+          clientCardsCopy.forEach((card, index) => {
+            if (
+              card.value === cardPlayed.value &&
+              card.suit === cardPlayed.suit
+            ) {
+              clientCardsCopy.splice(index, 1);
+              removedElements++;
+            }
+          });
+        });
+        console.log(`playedCards.length: ${playedCards.length}`);
+        console.log(`removedElements: ${removedElements}`);
+        if (playedCards.length === removedElements) {
+          // the played cards were valid
+          console.log("all playedCards were valid");
+          clients[socket.id].cards = [...clientCardsCopy]; // set the real cards value to the copy
+
+          //because user did not pass, set passedLastRound to false & reset consecutivePassedTurns
+          socket.passedLastRound = false;
+          rooms[roomName].consecutivePassedTurns = 0;
+
+          console.log("clients[socket.id].placement");
+          console.log(clients[socket.id].placement);
+          console.log("clients[socket.id].cards.length");
+          console.log(clients[socket.id].cards.length);
+          if (clients[socket.id].placement) {
+            console.log("socket.id.placements: true");
+          }
+
+          // show updated card amount of each user
+          getUsersCardsAmounts(roomName);
+
+          // check if player is out of cards
+          if (
+            clients[socket.id].cards.length === 0 &&
+            !clients[socket.id].placement
+          ) {
+            console.log(
+              `${socket.username} has ${
+                clients[socket.id].cards.length
+              } cards left, user is out of cards!`
+            );
+
+            // check the ranking/placement of the player
+            if (rooms[roomName].finishedUsersAmount) {
+              // There are finished users
+              console.log(
+                `there are ${rooms[roomName].finishedUsersAmount} finished users`
+              );
+
+              // add player to finishedUsersAmount
+              rooms[roomName].finishedUsersAmount++;
+
+              //set placement to current finishedUserAmount
+              clients[socket.id].placement =
+                rooms[roomName].finishedUsersAmount;
+              console.log(
+                `socket placement after ++ ${clients[socket.id].placement}`
+              );
+              console.log(
+                `finishedUsersAmount after ++ ${rooms[roomName].finishedUsersAmount}`
+              );
+              console.log(
+                `${socket.username} is ${
+                  clients[socket.id].placement
+                }th out of ${
+                  rooms[roomName].finishedUsersAmount
+                } finished users`
+              );
+
+              // pass finished user to end of finishedUsers property in the room
+              rooms[roomName].finishedUsers.push(clients[socket.id].id);
+
+              // check if game is finished
+              if (checkForNewGame(roomName, socket, playedCards)) {
+                // if a newGame is required, reset it here & stop code execution
+                // reset currentTurn & playerTurn, deck...
+
+                // send emit of new cards
+                Object.keys(rooms[roomName].users).forEach(userId => {
+                  // delete their previous placements
+                  if (clients[userId].placement) {
+                    delete clients[userId].placement;
+                  }
+
+                  io.in(clients[userId].id).emit(
+                    "cards",
+                    clients[userId].cards
+                  );
+                });
+
+                // send event that game is ready
+                io.in(rooms[roomName].name).emit(
+                  "gameReady",
+                  rooms[roomName].users
+                );
+
+                // send emit to winner of last round (president) that they can start
+                io.in(rooms[roomName].playerTurn).emit("turn", "your turn");
+                io.in(rooms[roomName].name).emit(
+                  "turn",
+                  clients[rooms[roomName].playerTurn].username
+                );
+
+                // show updated card amount of each user
+                getUsersCardsAmounts(roomName);
+
+                return;
+              }
+            } else {
+              // user is the first to finish
+              console.log(
+                `${clients[socket.id].username} was the first to finish!`
+              );
+              rooms[roomName].finishedUsersAmount = 1; // set finished amount default to 1
+              clients[socket.id].placement =
+                rooms[roomName].finishedUsersAmount; // pass placement to user
+              rooms[roomName].finishedUsers = [clients[socket.id].id];
+            }
+          }
+
+          /*
+          // check if game is over
+          if (checkForNewGame(roomName, socket, playedCards)) {
+            // if a newGame is required, reset it here & stop code execution
+            // reset currentTurn & playerTurn, deck...
+            io.in(rooms[roomName].name).emit("turn", "your turn");
+            return;
+          }
+          */
+
+          // If there is no need for a newGame / newRound: continue normally
+        } else {
+          // playedCards were not valid
+          console.log("invalid playedCards");
+          // emit error
+          return;
+        }
+      }
+
+      // send turn event to the next player
+      socket.in(nextTurn(rooms[roomName], socket)).emit("turn", "your turn");
+      io.in(rooms[roomName].name).emit(
+        "turn",
+        clients[rooms[roomName].playerTurn].username
+      );
+      // emit the playedCards for everyone
+      if (playedCards && Object.keys(playedCards).length !== 0) {
+        // keep track of lastPlayedCards (update when new cards got played)
+        console.log("playedCards is truthy: " + playedCards);
+        rooms[roomName].lastPlayedCards = playedCards;
+        rooms[roomName].lastUserWhoPlayed = clients[socket.id];
+
+        if (clients[socket.id].placement) {
+          if (checkForNewRound(rooms[roomName], socket)) {
+          }
+        }
+        //disable this if statement
+        if (20 === 2) {
+          // keep track of who played the last card(s)
+          if (clients[socket.id].placement) {
+            console.log("socket has placement check true");
+            // if player already has a placement, get another one
+            console.log("__returned socket normally___");
+            console.log(rooms[roomName].lastUserWhoPlayed);
+            // get a client[socket.id]
+            console.log("X-X-X-X-X-X");
+            console.log(
+              "__returned with clients[nextTurn(rooms[roomName], socket)])__"
+            );
+            // we need the next client[socket.id]
+            console.log(clients[nextTurn(rooms[roomName], socket)]);
+            console.log("X-X-X-X-X-X");
+            // rooms[roomName].lastUserWhoPlayed =
+            //   clients[nextTurn(rooms[roomName], socket)];
+          }
+        }
+      }
+      io.in(rooms[roomName].name).emit(
+        "lastPlayedCards",
+        rooms[roomName].lastPlayedCards,
+        socket.username
+      );
+    }
+  });
+
+  // player played a card
+  socket.on("playCard", (roomName, card) => {
+    console.log(socket.username);
+    console.log(roomName);
+    console.log(card);
+    io.in(roomName).emit("playedCard", socket.username, card);
+  });
+
+  //turns
+  socket.on("sendTurn", turnData => {
+    console.log(turnData);
+    console.log(`user-action: ${turnData.action}`);
+    io.emit(
+      "getTurn",
+      `player ${socket.id} has ${turnData.action} ${turnData.value} with randomNum ${randomNum}`
+    );
+  });
+
+  /*-- DISCONNECT --*/
+  //remove socket if client disconnected
+  socket.on("disconnect", () => {
+    //remove rooms that client was in
+    getUserRooms(socket).forEach(roomName => {
+      console.log(`${socket.id} has left ${roomName}`);
+      // send emit to every user in that room that they should leave
+      io.in(roomName).emit("gameOver", "leave game");
+      //delete user from rooms object
+      if (rooms[roomName] && rooms[roomName].users[socket.id]) {
+        delete rooms[roomName].users[socket.id];
+      }
+      //delete room
+      if (rooms[roomName]) {
+        delete rooms[roomName];
+      }
+      /*
+      //delete room if there are 0 users
+      if (Object.keys(rooms[roomName].users).length === 0) {
+        delete rooms[roomName];
+        //because a room was deleted, send an updated rooms event
+        io.emit("allRooms", rooms);
+      }
+      */
+    });
+    console.log(
+      `A user (${socket.id} ${
+        clients[socket.id].username ? clients[socket.id].username : ""
+      }) disconnected `
+    );
+    //delete user from clients
+    if (clients[socket.id]) {
+      delete clients[socket.id];
+    }
+    calcConnectedClients();
+    io.emit("allRooms", rooms);
+  });
+});
