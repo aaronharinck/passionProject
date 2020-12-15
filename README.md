@@ -39,3 +39,7 @@ Security and win conditions should be handled by a server.
 - https://github.com/aaronharinck/demo-multiplayer-cardgame-highcard
 
 - https://github.com/aaronharinck/vue-socketio-rooms
+
+**Online deploy**
+
+- https://deploy-demo-vue-rooms-client.vercel.app/
